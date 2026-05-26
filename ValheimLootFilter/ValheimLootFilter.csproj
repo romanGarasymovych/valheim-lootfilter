@@ -1,10 +1,10 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Library</OutputType>
     <TargetFramework>net48</TargetFramework>
-    <RootNamespace>JotunnModStub</RootNamespace>
-    <AssemblyName>JotunnModStub</AssemblyName>
+    <RootNamespace>ValheimLootFilter</RootNamespace>
+    <AssemblyName>ValheimLootFilter</AssemblyName>
     <FileAlignment>512</FileAlignment>
     <Deterministic>true</Deterministic>
     <LangVersion>10</LangVersion>
@@ -49,7 +49,7 @@
 
   <PropertyGroup>
     <VALHEIM_MANAGED>$(VALHEIM_INSTALL)/valheim_Data/Managed</VALHEIM_MANAGED>
-    <UNITY_FOLDER>$(SolutionDir)JotunnModStubUnity</UNITY_FOLDER>
+    <UNITY_FOLDER>$(SolutionDir)ValheimLootFilterUnity</UNITY_FOLDER>
   </PropertyGroup>
 
   <Target Name="CopyToUnity">
@@ -98,3 +98,4 @@
     <Exec  Command="sh &quot;$(SolutionDir)scripts/publish.sh&quot; --target &quot;$(ConfigurationName)&quot; --target-path &quot;$(TargetDir)&quot; --target-assembly &quot;$(TargetFileName)&quot; --valheim-path &quot;$(VALHEIM_INSTALL)&quot; --deploy-path &quot;$(MOD_DEPLOYPATH)&quot; --project-path &quot;$(ProjectDir)&quot;" />
   </Target>
 </Project>
+
