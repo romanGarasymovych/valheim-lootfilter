@@ -1,6 +1,6 @@
 ﻿{
-  "name": "JotunnModStub",
-  "description": "",
+  "name": "Loot Filter",
+  "description": "Filter out items from auto pick up with UI(?)",
   "version_number": "0.0.1",
   "website_url": "",
   "dependencies": [

@@ -9,8 +9,8 @@ namespace ValheimLootFilter
     //[NetworkCompatibility(CompatibilityLevel.EveryoneMustHaveMod, VersionStrictness.Minor)]
     internal class ValheimLootFilter : BaseUnityPlugin
     {
-        public const string PluginGUID = "com.jotunn.ValheimLootFilter";
-        public const string PluginName = "ValheimLootFilter";
+        public const string PluginGUID = "com.ukie.ValheimLootFilter";
+        public const string PluginName = "LootFilter";
         public const string PluginVersion = "0.0.1";
         
         // Use this class to add your own localization to the game
