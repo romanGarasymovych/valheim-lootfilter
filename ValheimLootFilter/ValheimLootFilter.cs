@@ -37,7 +37,7 @@ namespace ValheimLootFilter
 
             _harmony = new Harmony(PluginGUID);
             _harmony.PatchAll(typeof(LootFilterService.Patches));
-            Jotunn.Logger.LogInfo("LootFilter has been loaded");
+            _harmony.PatchAll(typeof(InventoryGuiPatch));
         }
 
         private void Update()
