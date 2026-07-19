@@ -98,6 +98,9 @@
 		<Copy
 		  SourceFiles="$(TargetPath)"
 		  DestinationFolder="C:\Users\Roma\AppData\Roaming\Thunderstore Mod Manager\DataFolder\Valheim\profiles\mod-test\BepInEx\plugins\ukie-Valheim Loot Filter" />
+		<Copy
+		  SourceFiles="$(TargetPath)"
+		  DestinationFolder="C:\Users\Roma\AppData\Roaming\Thunderstore Mod Manager\DataFolder\Valheim\profiles\no map\BepInEx\plugins\ukie-Valheim Loot Filter" />
 	</Target>
 </Project>
 

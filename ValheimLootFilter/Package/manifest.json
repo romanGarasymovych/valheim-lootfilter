@@ -1,7 +1,7 @@
 ﻿{
-  "name": "Loot Filter",
-  "description": "Filter out items from auto pick up with UI(?)",
-  "version_number": "0.0.1",
+  "name": "LootFilterUI",
+  "description": "Choose which items are excluded from auto-pickup via an in-game UI",
+  "version_number": "0.0.2",
   "website_url": "",
   "dependencies": [
     "denikson-BepInExPack_Valheim-5.4.2333",

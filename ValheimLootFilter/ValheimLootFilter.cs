@@ -15,7 +15,7 @@ namespace ValheimLootFilter
     {
         public const string PluginGUID = "com.ukie.ValheimLootFilter";
         public const string PluginName = "LootFilter";
-        public const string PluginVersion = "0.0.1";
+        public const string PluginVersion = "0.0.2";
 
         // Use this class to add your own localization to the game
         // https://valheim-modding.github.io/Jotunn/tutorials/localization.html
@@ -38,6 +38,7 @@ namespace ValheimLootFilter
             _harmony = new Harmony(PluginGUID);
             _harmony.PatchAll(typeof(LootFilterService.Patches));
             _harmony.PatchAll(typeof(InventoryGuiPatch));
+            Jotunn.Logger.LogInfo("LootFilter has landed");
         }
 
         private void Update()
