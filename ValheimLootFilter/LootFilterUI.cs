@@ -21,6 +21,16 @@ namespace ValheimLootFilter
         private static GameObject _scrollView;
         private static Transform _contentRoot;   // the ScrollRect.content transform
 
+        //  Search 
+        private static InputField _searchField;
+
+        // Every cell with its lowercase display name, and its section, so the
+        // search can hide/show cells without rebuilding the grid.
+        private static readonly List<(GameObject cell, string name, GameObject section)> _cells = new();
+
+        // Frame in which Esc closed the panel, so vanilla doesn't also act on it
+        private static int _closedByEscapeFrame = -1;
+
         //  Sprite cache so we only load each icon once 
         private static readonly Dictionary<string, Sprite> _iconCache = new();
 
@@ -32,7 +42,7 @@ namespace ValheimLootFilter
         private const float PanelW = 1050f;
         private const float PanelH = 800f;
         private const float ScrollW = 970f;
-        private const float ScrollH = 650f;
+        private const float ScrollH = 600f;
         private const float CellSize = 64f;
         private const float CellSpacing = 8f;
         private const float GroupHeaderH = 30f;
@@ -46,12 +56,52 @@ namespace ValheimLootFilter
             if (!_filtersPanel)
                 BuildPanel();
 
+            // BuildPanel bails out if the GUI isn't ready yet (e.g. loading screen)
+            if (!_filtersPanel)
+                return;
+
             bool next = !_filtersPanel.activeSelf;
             _filtersPanel.SetActive(next);
             GUIManager.BlockInput(next);
 
             if (next)
                 RefreshContent();
+            else if (_searchField)
+                _searchField.DeactivateInputField();
+        }
+
+        public static bool IsOpen => _filtersPanel && _filtersPanel.activeSelf;
+
+        /// <summary>True while the player is typing in the search box.</summary>
+        public static bool IsSearchFocused => _searchField && _searchField.isFocused;
+
+        /// <summary>
+        /// Close the panel if Esc (or gamepad B) was pressed. Call once per frame.
+        /// </summary>
+        public static void HandleEscape()
+        {
+            if (!IsOpen)
+                return;
+
+            if (ZInput.GetKeyDown(KeyCode.Escape, true) || ZInput.GetButtonDown("JoyButtonB"))
+            {
+                _closedByEscapeFrame = Time.frameCount;
+                TogglePanel();
+            }
+        }
+
+        /// <summary>
+        /// Stops the pause menu and the inventory from reacting to the same Esc
+        /// press that just closed our panel.
+        /// </summary>
+        [HarmonyLib.HarmonyPatch]
+        public static class Patches
+        {
+            [HarmonyLib.HarmonyPatch(typeof(Menu), nameof(Menu.Update))]
+            [HarmonyLib.HarmonyPatch(typeof(InventoryGui), nameof(InventoryGui.Update))]
+            [HarmonyLib.HarmonyPrefix]
+            private static bool SkipOnEscapeFrame()
+                => _closedByEscapeFrame != Time.frameCount;
         }
 
         /// <summary>
@@ -100,7 +150,7 @@ namespace ValheimLootFilter
 
             //  Subtitle / legend 
             var legend = GUIManager.Instance.CreateText(
-                text: "Click an item to toggle auto-pickup exclusion  [ red = excluded ]",
+                text: "Click an item to toggle auto-pickup  [ red = excluded ]",
                 parent: _filtersPanel.transform,
                 anchorMin: new Vector2(0.5f, 1f),
                 anchorMax: new Vector2(0.5f, 1f),
@@ -115,8 +165,24 @@ namespace ValheimLootFilter
                 addContentSizeFitter: false);
             legend.GetComponent<RectTransform>().pivot = new Vector2(0.5f, 1f);
 
+            //  Search box 
+            var search = GUIManager.Instance.CreateInputField(
+                parent: _filtersPanel.transform,
+                anchorMin: new Vector2(0.5f, 1f),
+                anchorMax: new Vector2(0.5f, 1f),
+                position: new Vector2(0f, -86f),
+                contentType: InputField.ContentType.Standard,
+                placeholderText: "Search items...",
+                fontSize: 16,
+                width: 400f,
+                height: 32f);
+            search.GetComponent<RectTransform>().pivot = new Vector2(0.5f, 1f);
+            _searchField = search.GetComponent<InputField>();
+            _searchField.onValueChanged.AddListener(ApplySearch);
+
             //  Scroll view 
-            // Position it so there's room for the title above and Close below.
+            // Position it so there's room for the title, legend and search above
+            // and Close below.
             _scrollView = GUIManager.Instance.CreateScrollView(
                 parent: _filtersPanel.transform,
                 showHorizontalScrollbar: false,
@@ -133,7 +199,7 @@ namespace ValheimLootFilter
             svRT.anchorMin = new Vector2(0.5f, 1f);
             svRT.anchorMax = new Vector2(0.5f, 1f);
             svRT.pivot = new Vector2(0.5f, 1f);
-            svRT.anchoredPosition = new Vector2(0f, -80f);   // below title + legend
+            svRT.anchoredPosition = new Vector2(0f, -126f);   // below title, legend, search
 
             //  Resolve the *actual* content transform 
             // CreateScrollView returns the ScrollView GameObject; the content lives
@@ -189,6 +255,7 @@ namespace ValheimLootFilter
             // Destroy previous children
             foreach (Transform child in _contentRoot)
                 Object.Destroy(child.gameObject);
+            _cells.Clear();
 
             var allItems = LootFilterService.GetAllItems();
             Jotunn.Logger.LogInfo($"Found {allItems.Count} total items in ObjectDB");
@@ -199,10 +266,6 @@ namespace ValheimLootFilter
                 : new HashSet<string>();
 
             Jotunn.Logger.LogInfo($"{knownNames.Count} items are known");
-            foreach (var name in knownNames)
-            {
-                Jotunn.Logger.LogInfo($"Known item: {name}");
-            }
             var groups = allItems
                 .GroupBy(i => i.m_itemData?.m_shared?.m_itemType ?? ItemDrop.ItemData.ItemType.Misc)
                 .OrderBy(g => g.Key.ToString());
@@ -224,8 +287,32 @@ namespace ValheimLootFilter
                 CreateGroupSection(group.Key.ToString(), discovered);
             }
 
+            // Re-apply the search the player left in the box last time
+            ApplySearch(_searchField ? _searchField.text : "");
+        }
+
+        /// <summary>
+        /// Show only cells whose name contains the query (case-insensitive) and
+        /// hide sections left with no visible cells.
+        /// </summary>
+        private static void ApplySearch(string query)
+        {
+            query = (query ?? "").Trim().ToLowerInvariant();
+
+            var visibleSections = new HashSet<GameObject>();
+            foreach (var (cell, name, section) in _cells)
+            {
+                bool match = query.Length == 0 || name.Contains(query);
+                cell.SetActive(match);
+                if (match) visibleSections.Add(section);
+            }
+
+            foreach (var (_, _, section) in _cells)
+                section.SetActive(visibleSections.Contains(section));
+
             // Force layout rebuild so the scroll view height is correct
-            LayoutRebuilder.ForceRebuildLayoutImmediate(_contentRoot as RectTransform);
+            if (_contentRoot)
+                LayoutRebuilder.ForceRebuildLayoutImmediate(_contentRoot as RectTransform);
         }
 
         //  One labelled section per category 
@@ -298,11 +385,11 @@ namespace ValheimLootFilter
 
             //  Item cells 
             foreach (var item in items)
-                CreateItemCell(grid.transform, item);
+                CreateItemCell(grid.transform, section, item);
         }
 
         //  Single icon cell 
-        private static void CreateItemCell(Transform parent, ItemDrop item)
+        private static void CreateItemCell(Transform parent, GameObject section, ItemDrop item)
         {
             bool isExcluded = LootFilterService.IsExcluded(item.name);
 
@@ -354,6 +441,8 @@ namespace ValheimLootFilter
             // Valheim uses localisation keys like "$item_sword_iron"; resolve if possible
             if (Localization.instance != null && displayName.StartsWith("$"))
                 displayName = Localization.instance.Localize(displayName);
+
+            _cells.Add((cell, displayName.ToLowerInvariant(), section));
 
             // A tiny name label at the bottom of the cell
             var label = GUIManager.Instance.CreateText(
