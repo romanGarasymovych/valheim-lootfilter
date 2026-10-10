@@ -3,6 +3,7 @@ using Jotunn.Managers;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.UI;
 
 namespace ValheimLootFilter
@@ -315,6 +316,11 @@ namespace ValheimLootFilter
                 LayoutRebuilder.ForceRebuildLayoutImmediate(_contentRoot as RectTransform);
         }
 
+        private static string TooltipText(bool excluded)
+            => excluded
+                ? "<color=#ff5050>Excluded from auto-pickup</color>\nClick to allow"
+                : "Auto-pickup allowed\nClick to exclude";
+
         //  One labelled section per category 
         private static void CreateGroupSection(string categoryName, List<ItemDrop> items)
         {
@@ -444,38 +450,14 @@ namespace ValheimLootFilter
 
             _cells.Add((cell, displayName.ToLowerInvariant(), section));
 
-            // A tiny name label at the bottom of the cell
-            var label = GUIManager.Instance.CreateText(
-                text: displayName,
-                parent: cell.transform,
-                anchorMin: new Vector2(0f, 0f),
-                anchorMax: new Vector2(1f, 0f),
-                position: Vector2.zero,
-                font: GUIManager.Instance.AveriaSerifBold,
-                fontSize: 7,
-                color: Color.white,
-                outline: true,
-                outlineColor: Color.black,
-                width: CellSize,
-                height: 14f,
-                addContentSizeFitter: false);
-
-            var labelRT = label.GetComponent<RectTransform>();
-            labelRT.pivot = new Vector2(0.5f, 0f);
-            labelRT.anchoredPosition = new Vector2(0f, 0f);
-
-            var labelText = label.GetComponent<Text>();
-            if (labelText)
-            {
-                labelText.alignment = TextAnchor.MiddleCenter;
-                labelText.resizeTextForBestFit = true;
-                labelText.resizeTextMinSize = 5;
-                labelText.resizeTextMaxSize = 9;
-            }
+            //  Hover tooltip 
+            var tooltip = cell.AddComponent<CellTooltip>();
+            tooltip.Set(displayName, TooltipText(isExcluded));
 
             //  Button click handler 
             // Capture locals for the closure
             string itemName = item.name;
+            string capturedName = displayName;
             Image capturedIcon = iconImg;
             GameObject capturedX = xOverlay;
 
@@ -484,6 +466,7 @@ namespace ValheimLootFilter
                 bool nowExcluded = LootFilterService.ToggleExcluded(itemName);
                 capturedIcon.color = nowExcluded ? ColExcluded : ColNormal;
                 capturedX.SetActive(nowExcluded);
+                tooltip.Set(capturedName, TooltipText(nowExcluded));
                 Jotunn.Logger.LogInfo($"[LootFilter] {itemName} excluded={nowExcluded}");
             });
 
@@ -507,6 +490,190 @@ namespace ValheimLootFilter
 
             _iconCache[item.name] = sprite;
             return sprite;
+        }
+    }
+
+    /// <summary>
+    /// Hover tooltip for filter cells: a small dark box with the item name and
+    /// its filter state that follows the cursor.
+    /// We build our own instead of using vanilla's UITooltip or its prefab:
+    /// UITooltip spawns under the nearest Canvas, which inside Jötunn's scroll
+    /// view is the masked Content object, and the prefab draws its box away
+    /// from its own position when moved to another canvas.
+    /// </summary>
+    internal class CellTooltip : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
+    {
+        private const float ShowDelay = 0.3f;
+
+        // Gap between the cursor and the tooltip's top-left corner (GUI units)
+        private static readonly Vector2 CursorOffset = new Vector2(20f, -20f);
+
+        // One tooltip object, shared by all cells and reused between hovers
+        private static RectTransform s_tooltip;
+        private static Text s_topicText;
+        private static Text s_bodyText;
+        private static CellTooltip s_owner;
+
+        private string _topic = "";
+        private string _text = "";
+        private bool _hovered;
+        private float _timer;
+
+        public void Set(string topic, string text)
+        {
+            _topic = topic;
+            _text = text;
+            if (s_owner == this)
+                UpdateText();
+        }
+
+        public void OnPointerEnter(PointerEventData eventData)
+        {
+            _hovered = true;
+            _timer = 0f;
+        }
+
+        public void OnPointerExit(PointerEventData eventData)
+        {
+            _hovered = false;
+            Hide();
+        }
+
+        private void OnDisable()
+        {
+            _hovered = false;
+            Hide();
+        }
+
+        private void LateUpdate()
+        {
+            if (!_hovered)
+                return;
+
+            if (s_owner != this)
+            {
+                _timer += Time.unscaledDeltaTime;
+                if (_timer < ShowDelay)
+                    return;
+                Show();
+            }
+
+            if (s_tooltip)
+                PositionAtCursor();
+        }
+
+        private void Show()
+        {
+            if (!s_tooltip)
+                BuildTooltip();
+
+            s_owner = this;
+            UpdateText();
+            s_tooltip.SetAsLastSibling();
+            s_tooltip.gameObject.SetActive(true);
+        }
+
+        private void Hide()
+        {
+            if (s_owner != this)
+                return;
+
+            s_owner = null;
+            if (s_tooltip)
+                s_tooltip.gameObject.SetActive(false);
+        }
+
+        private void UpdateText()
+        {
+            s_topicText.text = _topic;
+            s_bodyText.text = _text;
+
+            // Size the box to the new text right away so positioning is exact
+            LayoutRebuilder.ForceRebuildLayoutImmediate(s_tooltip);
+        }
+
+        private static void BuildTooltip()
+        {
+            var go = new GameObject("LootFilterTooltip", typeof(RectTransform));
+            go.transform.SetParent(GUIManager.CustomGUIFront.transform, false);
+
+            s_tooltip = (RectTransform)go.transform;
+            s_tooltip.anchorMin = s_tooltip.anchorMax = Vector2.zero;
+            s_tooltip.pivot = new Vector2(0f, 1f);   // top-left corner follows the cursor
+
+            var bg = go.AddComponent<Image>();
+            bg.color = new Color(0f, 0f, 0f, 0.85f);
+            bg.raycastTarget = false;   // never steal the hover from the cell
+
+            var vlg = go.AddComponent<VerticalLayoutGroup>();
+            vlg.padding = new RectOffset(10, 10, 6, 8);
+            vlg.spacing = 2f;
+            vlg.childAlignment = TextAnchor.UpperLeft;
+            vlg.childControlWidth = true;
+            vlg.childControlHeight = true;
+            vlg.childForceExpandWidth = false;
+            vlg.childForceExpandHeight = false;
+
+            var csf = go.AddComponent<ContentSizeFitter>();
+            csf.horizontalFit = ContentSizeFitter.FitMode.PreferredSize;
+            csf.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+            s_topicText = CreateLine(go.transform, 18, GUIManager.Instance.ValheimOrange);
+            s_bodyText = CreateLine(go.transform, 14, Color.white);
+
+            go.SetActive(false);
+        }
+
+        private static Text CreateLine(Transform parent, int fontSize, Color color)
+        {
+            var textGO = GUIManager.Instance.CreateText(
+                text: "",
+                parent: parent,
+                anchorMin: Vector2.zero,
+                anchorMax: Vector2.zero,
+                position: Vector2.zero,
+                font: GUIManager.Instance.AveriaSerifBold,
+                fontSize: fontSize,
+                color: color,
+                outline: true,
+                outlineColor: Color.black,
+                width: 0f,
+                height: 0f,
+                addContentSizeFitter: false);
+
+            var text = textGO.GetComponent<Text>();
+            text.alignment = TextAnchor.UpperLeft;
+            text.horizontalOverflow = HorizontalWrapMode.Overflow;
+            text.verticalOverflow = VerticalWrapMode.Overflow;
+            text.supportRichText = true;
+            text.raycastTarget = false;
+            return text;
+        }
+
+        /// <summary>
+        /// Hang the tooltip below-right of the cursor, flipping to the left /
+        /// above near screen edges.
+        /// </summary>
+        private static void PositionAtCursor()
+        {
+            // Overlay canvas: world space is screen pixels, y grows upwards
+            float scale = s_tooltip.lossyScale.x;
+            Vector2 size = s_tooltip.rect.size * scale;
+            Vector2 offset = CursorOffset * scale;
+            Vector2 pointer = ZInput.pointerPosition;
+
+            float left = pointer.x + offset.x;
+            if (left + size.x > Screen.width)
+                left = pointer.x - offset.x - size.x;
+
+            float top = pointer.y + offset.y;
+            if (top - size.y < 0f)
+                top = pointer.y - offset.y + size.y;
+
+            left = Mathf.Clamp(left, 0f, Mathf.Max(0f, Screen.width - size.x));
+            top = Mathf.Clamp(top, Mathf.Min(size.y, Screen.height), Screen.height);
+
+            s_tooltip.position = new Vector3(left, top, 0f);
         }
     }
 
