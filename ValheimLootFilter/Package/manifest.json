@@ -1,10 +1,10 @@
 ﻿{
   "name": "LootFilterUI",
   "description": "Choose which items are excluded from auto-pickup via an in-game UI",
-  "version_number": "0.0.2",
+  "version_number": "1.0.0",
   "website_url": "",
   "dependencies": [
     "denikson-BepInExPack_Valheim-5.4.2333",
-    "ValheimModding-Jotunn-2.26.1"
+    "ValheimModding-Jotunn-2.29.2"
   ]
 }

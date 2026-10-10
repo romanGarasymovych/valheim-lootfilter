@@ -91,40 +91,60 @@ namespace ValheimLootFilter
                     .ToList();
         }
 
+        /// <summary>
+        /// Replacement for the <c>item.m_autoPickup</c> check inside Player.AutoPickup.
+        /// Keeps the vanilla flag (e.g. items the player just dropped) and adds the filter.
+        /// Must be public: it is called from Valheim's own code via the transpiler.
+        /// </summary>
+        public static bool AllowAutoPickup(ItemDrop item)
+            => item.m_autoPickup && !IsExcluded(GetPrefabName(item));
+
+        private static string GetPrefabName(ItemDrop item)
+        {
+            // ItemDrop.Awake points m_dropPrefab at the ObjectDB prefab, whose name is
+            // exactly the key the UI stores — no string work needed per frame.
+            var prefab = item.m_itemData?.m_dropPrefab;
+            return prefab != null
+                ? prefab.name
+                : item.gameObject.name.Replace("(Clone)", "").Trim();
+        }
+
         // ── Harmony patch — intercept the auto-pickup request ────────────────────
         [HarmonyLib.HarmonyPatch]
         public static class Patches
         {
             /// <summary>
-            /// Patch Player.AutoPickup (called every frame when near an item).
-            /// If the item's prefab name is in the excluded set, skip it.
+            /// Patch Player.AutoPickup so it skips excluded items the same way it
+            /// skips items with m_autoPickup == false. Only auto-pickup reads that
+            /// flag, so manual pickup (E) keeps working. Patching ItemDrop.CanPickup
+            /// instead would also block manual pickup, and makes AutoPickup call
+            /// RequestOwn on the item every frame.
             /// </summary>
             [HarmonyLib.HarmonyPatch(typeof(Player), nameof(Player.AutoPickup))]
-            [HarmonyLib.HarmonyPrefix]
-            private static bool AutoPickup_Prefix(Player __instance)
+            [HarmonyLib.HarmonyTranspiler]
+            private static IEnumerable<HarmonyLib.CodeInstruction> AutoPickup_Transpiler(
+                IEnumerable<HarmonyLib.CodeInstruction> instructions)
             {
-                // We let the method run; we block individual items inside the
-                // original method via the ItemDrop.CanPickup patch below.
-                return true;
-            }
+                var autoPickupField = HarmonyLib.AccessTools.Field(typeof(ItemDrop), nameof(ItemDrop.m_autoPickup));
+                var allowMethod = HarmonyLib.AccessTools.Method(typeof(LootFilterService), nameof(AllowAutoPickup));
+                bool patched = false;
 
-            /// <summary>
-            /// Patch ItemDrop.CanPickup so excluded items always return false.
-            /// This is the cleanest intercept point — it's checked by the base
-            /// auto-pickup loop before the item is touched.
-            /// </summary>
-            [HarmonyLib.HarmonyPatch(typeof(ItemDrop), nameof(ItemDrop.CanPickup))]
-            [HarmonyLib.HarmonyPostfix]
-            private static void CanPickup_Postfix(ItemDrop __instance, ref bool __result)
-            {
-                if (!__result) return;   // already blocked for another reason
+                foreach (var instruction in instructions)
+                {
+                    // `ldfld ItemDrop::m_autoPickup` pops the ItemDrop and pushes a bool;
+                    // a static call taking the ItemDrop has the same stack shape.
+                    if (!patched && HarmonyLib.CodeInstructionExtensions.LoadsField(instruction, autoPickupField))
+                    {
+                        instruction.opcode = System.Reflection.Emit.OpCodes.Call;
+                        instruction.operand = allowMethod;
+                        patched = true;
+                    }
 
-                string prefabName = __instance.gameObject.name
-                                             .Replace("(Clone)", "")
-                                             .Trim();
+                    yield return instruction;
+                }
 
-                if (IsExcluded(prefabName))
-                    __result = false;
+                if (!patched)
+                    Jotunn.Logger.LogError("[LootFilter] m_autoPickup check not found in Player.AutoPickup — filter is inactive");
             }
         }
     }

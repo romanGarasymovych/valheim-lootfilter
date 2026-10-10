@@ -15,7 +15,7 @@ namespace ValheimLootFilter
     {
         public const string PluginGUID = "com.ukie.ValheimLootFilter";
         public const string PluginName = "LootFilter";
-        public const string PluginVersion = "0.0.2";
+        public const string PluginVersion = "1.0.0";
 
         // Use this class to add your own localization to the game
         // https://valheim-modding.github.io/Jotunn/tutorials/localization.html
@@ -38,6 +38,7 @@ namespace ValheimLootFilter
             _harmony = new Harmony(PluginGUID);
             _harmony.PatchAll(typeof(LootFilterService.Patches));
             _harmony.PatchAll(typeof(InventoryGuiPatch));
+            _harmony.PatchAll(typeof(LootFilterUI.Patches));
             Jotunn.Logger.LogInfo("LootFilter has landed");
         }
 
@@ -47,7 +48,10 @@ namespace ValheimLootFilter
                 return;
 
             // This is called every frame, you can use it to check for input or other things that need to be updated regularly
-            if (ZInput.GetButtonDown(LootFilterShortcutButton.Name))
+            LootFilterUI.HandleEscape();
+
+            // Don't toggle while the player is typing "l" into the search box
+            if (!LootFilterUI.IsSearchFocused && ZInput.GetButtonDown(LootFilterShortcutButton.Name))
             {
                 LootFilterUI.TogglePanel();
             }
