@@ -1,4 +1,5 @@
 using BepInEx;
+using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
 using Jotunn.Configs;
@@ -6,6 +7,7 @@ using Jotunn.Entities;
 using Jotunn.Managers;
 using UnityEngine;
 using UnityEngine.UI;
+using System.Linq;
 namespace ValheimLootFilter
 {
     [BepInPlugin(PluginGUID, PluginName, PluginVersion)]
@@ -22,18 +24,25 @@ namespace ValheimLootFilter
         public static CustomLocalization Localization = LocalizationManager.Instance.GetLocalization();
 
         private Harmony _harmony;
-        private ButtonConfig LootFilterShortcutButton;
+        private ConfigEntry<KeyboardShortcut> _openPanelKey;
+        private ConfigEntry<KeyboardShortcut> _toggleFilterKey;
+
         private void Awake()
         {
             // 1. Init the service (loads saved exclusions from config)
             LootFilterService.Init(Config);
 
-            LootFilterShortcutButton = new ButtonConfig
-            {
-                Name = "ValheimLootFiler_ShortcutButton",
-                Key = KeyCode.L
-            };
-            InputManager.Instance.AddButton(PluginGUID, LootFilterShortcutButton);
+            // Keybinds live in the BepInEx config so Configuration Manager can rebind them
+            _openPanelKey = Config.Bind(
+                section: "Keybinds",
+                key: "Open panel",
+                defaultValue: new KeyboardShortcut(KeyCode.L),
+                description: "Open or close the loot filter panel");
+            _toggleFilterKey = Config.Bind(
+                section: "Keybinds",
+                key: "Toggle filter",
+                defaultValue: new KeyboardShortcut(KeyCode.L, KeyCode.LeftControl),
+                description: "Turn the loot filter on or off");
 
             _harmony = new Harmony(PluginGUID);
             _harmony.PatchAll(typeof(LootFilterService.Patches));
@@ -50,11 +59,41 @@ namespace ValheimLootFilter
             // This is called every frame, you can use it to check for input or other things that need to be updated regularly
             LootFilterUI.HandleEscape();
 
-            // Don't toggle while the player is typing "l" into the search box
-            if (!LootFilterUI.IsSearchFocused && ZInput.GetButtonDown(LootFilterShortcutButton.Name))
+            if (!CanUseHotkeys())
+                return;
+
+            var toggleKey = _toggleFilterKey.Value;
+            var openKey = _openPanelKey.Value;
+            bool toggleHit = Hotkeys.IsDown(toggleKey);
+            bool openHit = Hotkeys.IsDown(openKey);
+
+            // Ctrl+L also contains L: when both match, the one with more
+            // modifiers is the one the player meant
+            if (toggleHit && openHit)
             {
-                LootFilterUI.TogglePanel();
+                if (toggleKey.Modifiers.Count() >= openKey.Modifiers.Count())
+                    openHit = false;
+                else
+                    toggleHit = false;
             }
+
+            if (toggleHit)
+                ToggleFilter();
+            if (openHit)
+                LootFilterUI.TogglePanel();
+        }
+
+        // Same rules vanilla uses for player hotkeys: not while typing in chat,
+        // in menus, in the inventory, or in our own search box.
+        private static bool CanUseHotkeys()
+            => !LootFilterUI.IsSearchFocused
+               && Player.m_localPlayer != null
+               && Player.m_localPlayer.TakeInput();
+
+        private static void ToggleFilter()
+        {
+            bool on = LootFilterService.ToggleEnabled();
+            Player.m_localPlayer?.Message(MessageHud.MessageType.Center, on ? "Loot filter on" : "Loot filter off");
         }
     }
 }

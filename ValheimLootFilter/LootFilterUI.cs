@@ -25,6 +25,9 @@ namespace ValheimLootFilter
         //  Search 
         private static InputField _searchField;
 
+        //  Filter on/off button 
+        private static Text _filterToggleLabel;
+
         // Every cell with its lowercase display name, and its section, so the
         // search can hide/show cells without rebuilding the grid.
         private static readonly List<(GameObject cell, string name, GameObject section)> _cells = new();
@@ -239,6 +242,34 @@ namespace ValheimLootFilter
                 height: 60f);
             closeBtn.SetActive(true);
             closeBtn.GetComponent<Button>().onClick.AddListener(TogglePanel);
+
+            //  Filter on/off button (bottom left) 
+            var filterBtn = GUIManager.Instance.CreateButton(
+                text: "",
+                parent: _filtersPanel.transform,
+                anchorMin: new Vector2(0f, 0f),
+                anchorMax: new Vector2(0f, 0f),
+                position: new Vector2(170f, 40f),
+                width: 220f,
+                height: 60f);
+            filterBtn.SetActive(true);
+            filterBtn.GetComponent<Button>().onClick.AddListener(() => LootFilterService.ToggleEnabled());
+            _filterToggleLabel = filterBtn.GetComponentInChildren<Text>();
+
+            // Stay in sync when the hotkey or Configuration Manager flips it
+            LootFilterService.EnabledChanged += _ => UpdateFilterToggleLabel();
+            UpdateFilterToggleLabel();
+        }
+
+        private static void UpdateFilterToggleLabel()
+        {
+            if (!_filterToggleLabel)
+                return;
+
+            _filterToggleLabel.text = LootFilterService.Enabled
+                ? "Filter: <color=#7fd17f>On</color>"
+                : "Filter: <color=#ff5050>Off</color>";
+            _filterToggleLabel.supportRichText = true;
         }
 
 

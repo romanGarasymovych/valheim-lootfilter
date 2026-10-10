@@ -23,12 +23,23 @@ namespace ValheimLootFilter
         // ── Persistence ───────────────────────────────────────────────────────────
         // Stored as a comma-separated string in BepInEx config so it survives restarts.
         private static ConfigEntry<string> _cfgExcluded;
+        private static ConfigEntry<bool> _cfgEnabled;
+
+        /// <summary>Raised when the filter is turned on/off (hotkey, panel or config manager).</summary>
+        public static event System.Action<bool> EnabledChanged;
 
         private static readonly HashSet<string> ExcludedItems = new();
 
         // ── Call this from your Plugin.Awake() ───────────────────────────────────
         public static void Init(ConfigFile config)
         {
+            _cfgEnabled = config.Bind(
+                section: "General",
+                key: "Enabled",
+                defaultValue: true,
+                description: "Turn the loot filter on or off. When off, everything is auto-picked up as usual.");
+            _cfgEnabled.SettingChanged += (_, _) => EnabledChanged?.Invoke(_cfgEnabled.Value);
+
             _cfgExcluded = config.Bind(
                 section: "LootFilter",
                 key: "ExcludedItems",
@@ -46,6 +57,19 @@ namespace ValheimLootFilter
         }
 
         // ── Query / mutate ────────────────────────────────────────────────────────
+
+        public static bool Enabled
+        {
+            get => _cfgEnabled == null || _cfgEnabled.Value;
+            set { if (_cfgEnabled != null) _cfgEnabled.Value = value; }
+        }
+
+        /// <summary>Flip the filter on/off. Returns the new state (true = on).</summary>
+        public static bool ToggleEnabled()
+        {
+            Enabled = !Enabled;
+            return Enabled;
+        }
 
         public static bool IsExcluded(string prefabName)
             => ExcludedItems.Contains(prefabName);
@@ -97,7 +121,7 @@ namespace ValheimLootFilter
         /// Must be public: it is called from Valheim's own code via the transpiler.
         /// </summary>
         public static bool AllowAutoPickup(ItemDrop item)
-            => item.m_autoPickup && !IsExcluded(GetPrefabName(item));
+            => item.m_autoPickup && (!Enabled || !IsExcluded(GetPrefabName(item)));
 
         private static string GetPrefabName(ItemDrop item)
         {
