@@ -24,11 +24,17 @@ namespace ValheimLootFilter
         // Stored as a comma-separated string in BepInEx config so it survives restarts.
         private static ConfigEntry<string> _cfgExcluded;
         private static ConfigEntry<bool> _cfgEnabled;
+        private static ConfigEntry<string> _cfgExcludedCategories;
+        private static ConfigEntry<string> _cfgQuantityLimits;
 
         /// <summary>Raised when the filter is turned on/off (hotkey, panel or config manager).</summary>
         public static event System.Action<bool> EnabledChanged;
 
         private static readonly HashSet<string> ExcludedItems = new();
+        private static readonly HashSet<ItemDrop.ItemData.ItemType> ExcludedCategories = new();
+
+        // prefab name → keep auto-picking up until the inventory holds this many
+        private static readonly Dictionary<string, int> QuantityLimits = new();
 
         // ── Call this from your Plugin.Awake() ───────────────────────────────────
         public static void Init(ConfigFile config)
@@ -46,13 +52,62 @@ namespace ValheimLootFilter
                 defaultValue: "",
                 description: "Comma-separated list of prefab names excluded from auto-pickup");
 
-            // Load saved exclusions
-            foreach (var name in _cfgExcluded.Value
-                         .Split(',')
-                         .Select(s => s.Trim())
-                         .Where(s => s.Length > 0))
-            {
+            _cfgExcludedCategories = config.Bind(
+                section: "LootFilter",
+                key: "ExcludedCategories",
+                defaultValue: "",
+                description: "Comma-separated item categories (e.g. Material, Trophy) excluded from auto-pickup, including items you haven't found yet");
+
+            _cfgQuantityLimits = config.Bind(
+                section: "LootFilter",
+                key: "QuantityLimits",
+                defaultValue: "",
+                description: "Comma-separated prefab:amount pairs (e.g. Wood:50). Auto-pickup of that item stops once you carry that many");
+
+            // Load saved rules, and reload them if they're edited in Configuration Manager
+            LoadExcludedItems();
+            LoadExcludedCategories();
+            LoadQuantityLimits();
+            _cfgExcluded.SettingChanged += (_, _) => LoadExcludedItems();
+            _cfgExcludedCategories.SettingChanged += (_, _) => LoadExcludedCategories();
+            _cfgQuantityLimits.SettingChanged += (_, _) => LoadQuantityLimits();
+        }
+
+        private static IEnumerable<string> SplitList(string value)
+            => (value ?? "")
+                .Split(',')
+                .Select(s => s.Trim())
+                .Where(s => s.Length > 0);
+
+        private static void LoadExcludedItems()
+        {
+            ExcludedItems.Clear();
+            foreach (var name in SplitList(_cfgExcluded.Value))
                 ExcludedItems.Add(name);
+        }
+
+        private static void LoadExcludedCategories()
+        {
+            ExcludedCategories.Clear();
+            foreach (var name in SplitList(_cfgExcludedCategories.Value))
+            {
+                if (Enum.TryParse(name, ignoreCase: true, out ItemDrop.ItemData.ItemType category))
+                    ExcludedCategories.Add(category);
+                else
+                    Jotunn.Logger.LogWarning($"[LootFilter] Unknown item category '{name}' in ExcludedCategories");
+            }
+        }
+
+        private static void LoadQuantityLimits()
+        {
+            QuantityLimits.Clear();
+            foreach (var pair in SplitList(_cfgQuantityLimits.Value))
+            {
+                var parts = pair.Split(':');
+                if (parts.Length == 2 && int.TryParse(parts[1].Trim(), out int limit) && limit > 0)
+                    QuantityLimits[parts[0].Trim()] = limit;
+                else
+                    Jotunn.Logger.LogWarning($"[LootFilter] Ignoring invalid quantity limit '{pair}'");
             }
         }
 
@@ -99,6 +154,41 @@ namespace ValheimLootFilter
                 _cfgExcluded.Value = string.Join(",", ExcludedItems);
         }
 
+        // ── Category rules ────────────────────────────────────────────────────────
+
+        public static bool IsCategoryExcluded(ItemDrop.ItemData.ItemType category)
+            => ExcludedCategories.Contains(category);
+
+        /// <summary>Flip a whole category. Returns the new state (true = excluded).</summary>
+        public static bool ToggleCategoryExcluded(ItemDrop.ItemData.ItemType category)
+        {
+            bool nowExcluded = ExcludedCategories.Add(category);
+            if (!nowExcluded)
+                ExcludedCategories.Remove(category);
+
+            if (_cfgExcludedCategories != null)
+                _cfgExcludedCategories.Value = string.Join(",", ExcludedCategories);
+            return nowExcluded;
+        }
+
+        // ── Quantity rules ────────────────────────────────────────────────────────
+
+        /// <summary>Keep-up-to amount for an item, or 0 when it has no limit.</summary>
+        public static int GetQuantityLimit(string prefabName)
+            => QuantityLimits.TryGetValue(prefabName, out int limit) ? limit : 0;
+
+        /// <summary>Set the keep-up-to amount; 0 or less removes the limit.</summary>
+        public static void SetQuantityLimit(string prefabName, int limit)
+        {
+            if (limit > 0)
+                QuantityLimits[prefabName] = limit;
+            else
+                QuantityLimits.Remove(prefabName);
+
+            if (_cfgQuantityLimits != null)
+                _cfgQuantityLimits.Value = string.Join(",", QuantityLimits.Select(kv => $"{kv.Key}:{kv.Value}"));
+        }
+
         // ── Item discovery ────────────────────────────────────────────────────────
 
         /// <summary>
@@ -121,7 +211,31 @@ namespace ValheimLootFilter
         /// Must be public: it is called from Valheim's own code via the transpiler.
         /// </summary>
         public static bool AllowAutoPickup(ItemDrop item)
-            => item.m_autoPickup && (!Enabled || !IsExcluded(GetPrefabName(item)));
+        {
+            if (!item.m_autoPickup)
+                return false;
+            if (!Enabled)
+                return true;
+
+            var shared = item.m_itemData?.m_shared;
+            if (shared != null && ExcludedCategories.Contains(shared.m_itemType))
+                return false;
+
+            string prefabName = GetPrefabName(item);
+            if (IsExcluded(prefabName))
+                return false;
+
+            // Quantity rule: stop once the inventory already holds the limit.
+            // A whole stack is still picked up, so the total can end up a bit over.
+            if (shared != null && QuantityLimits.TryGetValue(prefabName, out int limit))
+            {
+                var inventory = Player.m_localPlayer?.GetInventory();
+                if (inventory != null && inventory.CountItems(shared.m_name, -1, false) >= limit)
+                    return false;
+            }
+
+            return true;
+        }
 
         private static string GetPrefabName(ItemDrop item)
         {

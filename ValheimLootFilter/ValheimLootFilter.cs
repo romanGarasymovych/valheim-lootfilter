@@ -84,9 +84,9 @@ namespace ValheimLootFilter
         }
 
         // Same rules vanilla uses for player hotkeys: not while typing in chat,
-        // in menus, in the inventory, or in our own search box.
+        // in menus, in the inventory, or in our own text fields.
         private static bool CanUseHotkeys()
-            => !LootFilterUI.IsSearchFocused
+            => !LootFilterUI.IsTyping
                && Player.m_localPlayer != null
                && Player.m_localPlayer.TakeInput();
 

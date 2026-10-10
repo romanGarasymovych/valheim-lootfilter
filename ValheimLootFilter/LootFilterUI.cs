@@ -28,6 +28,28 @@ namespace ValheimLootFilter
         //  Filter on/off button 
         private static Text _filterToggleLabel;
 
+        //  Per-cell and per-category views, refreshed when rules change 
+        private static readonly List<CellView> _cellViews = new();
+        private static readonly Dictionary<ItemDrop.ItemData.ItemType, Text> _categoryButtonLabels = new();
+        private static readonly Dictionary<ItemDrop.ItemData.ItemType, Text> _categoryHeaders = new();
+
+        //  Keep-up-to limit popup 
+        private static GameObject _limitPopup;
+        private static Text _limitPopupTitle;
+        private static InputField _limitField;
+        private static CellView _limitTarget;
+
+        private class CellView
+        {
+            public string PrefabName;
+            public string DisplayName;
+            public ItemDrop.ItemData.ItemType Category;
+            public Image Icon;
+            public GameObject XOverlay;
+            public Text LimitLabel;
+            public CellTooltip Tooltip;
+        }
+
         // Every cell with its lowercase display name, and its section, so the
         // search can hide/show cells without rebuilding the grid.
         private static readonly List<(GameObject cell, string name, GameObject section)> _cells = new();
@@ -41,6 +63,7 @@ namespace ValheimLootFilter
         //  Colours 
         private static readonly Color ColNormal = new Color(1f, 1f, 1f, 1f);   // white  — not excluded
         private static readonly Color ColExcluded = new Color(1f, 0.2f, 0.2f, 1f); // red    — excluded
+        private static readonly Color ColLimit = new Color(1f, 0.85f, 0.35f, 1f);  // yellow — keep-up-to amount
 
         //  Layout constants 
         private const float PanelW = 1050f;
@@ -70,14 +93,19 @@ namespace ValheimLootFilter
 
             if (next)
                 RefreshContent();
-            else if (_searchField)
-                _searchField.DeactivateInputField();
+            else
+            {
+                if (_searchField)
+                    _searchField.DeactivateInputField();
+                CloseLimitPopup();
+            }
         }
 
         public static bool IsOpen => _filtersPanel && _filtersPanel.activeSelf;
 
-        /// <summary>True while the player is typing in the search box.</summary>
-        public static bool IsSearchFocused => _searchField && _searchField.isFocused;
+        /// <summary>True while the player is typing in the search box or the limit field.</summary>
+        public static bool IsTyping
+            => (_searchField && _searchField.isFocused) || (_limitField && _limitField.isFocused);
 
         /// <summary>
         /// Close the panel if Esc (or gamepad B) was pressed. Call once per frame.
@@ -90,7 +118,12 @@ namespace ValheimLootFilter
             if (ZInput.GetKeyDown(KeyCode.Escape, true) || ZInput.GetButtonDown("JoyButtonB"))
             {
                 _closedByEscapeFrame = Time.frameCount;
-                TogglePanel();
+
+                // Esc backs out of the limit popup first, then the panel
+                if (_limitPopup && _limitPopup.activeSelf)
+                    CloseLimitPopup();
+                else
+                    TogglePanel();
             }
         }
 
@@ -154,7 +187,7 @@ namespace ValheimLootFilter
 
             //  Subtitle / legend 
             var legend = GUIManager.Instance.CreateText(
-                text: "Click an item to toggle auto-pickup  [ red = excluded ]",
+                text: "Click: toggle auto-pickup    Right-click: keep-up-to amount    [ red = excluded ]",
                 parent: _filtersPanel.transform,
                 anchorMin: new Vector2(0.5f, 1f),
                 anchorMax: new Vector2(0.5f, 1f),
@@ -259,6 +292,8 @@ namespace ValheimLootFilter
             // Stay in sync when the hotkey or Configuration Manager flips it
             LootFilterService.EnabledChanged += _ => UpdateFilterToggleLabel();
             UpdateFilterToggleLabel();
+
+            BuildLimitPopup();
         }
 
         private static void UpdateFilterToggleLabel()
@@ -288,6 +323,9 @@ namespace ValheimLootFilter
             foreach (Transform child in _contentRoot)
                 Object.Destroy(child.gameObject);
             _cells.Clear();
+            _cellViews.Clear();
+            _categoryButtonLabels.Clear();
+            _categoryHeaders.Clear();
 
             var allItems = LootFilterService.GetAllItems();
             Jotunn.Logger.LogInfo($"Found {allItems.Count} total items in ObjectDB");
@@ -316,7 +354,7 @@ namespace ValheimLootFilter
                     continue;
                 }
 
-                CreateGroupSection(group.Key.ToString(), discovered);
+                CreateGroupSection(group.Key, discovered);
             }
 
             // Re-apply the search the player left in the box last time
@@ -347,14 +385,57 @@ namespace ValheimLootFilter
                 LayoutRebuilder.ForceRebuildLayoutImmediate(_contentRoot as RectTransform);
         }
 
-        private static string TooltipText(bool excluded)
-            => excluded
-                ? "<color=#ff5050>Excluded from auto-pickup</color>\nClick to allow"
-                : "Auto-pickup allowed\nClick to exclude";
+        private static string TooltipText(CellView view)
+        {
+            string state;
+            if (LootFilterService.IsCategoryExcluded(view.Category))
+                state = "<color=#ff5050>Excluded with its category</color>\nUse the category button to allow";
+            else if (LootFilterService.IsExcluded(view.PrefabName))
+                state = "<color=#ff5050>Excluded from auto-pickup</color>\nClick to allow";
+            else
+            {
+                int limit = LootFilterService.GetQuantityLimit(view.PrefabName);
+                state = limit > 0
+                    ? $"Auto-pickup until you carry {limit}\nClick to exclude"
+                    : "Auto-pickup allowed\nClick to exclude";
+            }
+
+            return state + "\nRight-click to set a keep-up-to amount";
+        }
+
+        /// <summary>Re-apply icon tint, ✕, limit label and tooltip from the current rules.</summary>
+        private static void RefreshCell(CellView view)
+        {
+            bool excluded = LootFilterService.IsCategoryExcluded(view.Category)
+                            || LootFilterService.IsExcluded(view.PrefabName);
+            int limit = LootFilterService.GetQuantityLimit(view.PrefabName);
+
+            view.Icon.color = excluded ? ColExcluded : ColNormal;
+            view.XOverlay.SetActive(excluded);
+            view.LimitLabel.text = limit > 0 ? limit.ToString() : "";
+            view.LimitLabel.gameObject.SetActive(limit > 0 && !excluded);
+            view.Tooltip.Set(view.DisplayName, TooltipText(view));
+        }
+
+        private static void RefreshCategory(ItemDrop.ItemData.ItemType category)
+        {
+            bool excluded = LootFilterService.IsCategoryExcluded(category);
+            if (_categoryButtonLabels.TryGetValue(category, out var label) && label)
+                label.text = excluded ? "Allow all" : "Exclude all";
+            if (_categoryHeaders.TryGetValue(category, out var header) && header)
+                header.text = excluded
+                    ? $"{category}  <color=#ff5050>(whole category excluded)</color>"
+                    : category.ToString();
+
+            foreach (var view in _cellViews)
+                if (view.Category == category)
+                    RefreshCell(view);
+        }
 
         //  One labelled section per category 
-        private static void CreateGroupSection(string categoryName, List<ItemDrop> items)
+        private static void CreateGroupSection(ItemDrop.ItemData.ItemType category, List<ItemDrop> items)
         {
+            string categoryName = category.ToString();
             Jotunn.Logger.LogInfo($"Creating section for category '{categoryName}' with {items.Count} items");
             // Section root — fixed width to match scroll view, auto height
             var section = new GameObject($"Section_{categoryName}", typeof(RectTransform));
@@ -375,10 +456,36 @@ namespace ValheimLootFilter
             sectionCSF.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
             sectionCSF.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
 
-            //  Category header label 
+            //  Category header row: name on the left, exclude-all button on the right 
+            var headerRow = new GameObject($"Header_{categoryName}", typeof(RectTransform));
+            headerRow.transform.SetParent(section.transform, false);
+            ((RectTransform)headerRow.transform).sizeDelta = new Vector2(ScrollW - 24f, GroupHeaderH);
+
+            var categoryBtn = GUIManager.Instance.CreateButton(
+                text: "",
+                parent: headerRow.transform,
+                anchorMin: new Vector2(1f, 0.5f),
+                anchorMax: new Vector2(1f, 0.5f),
+                position: new Vector2(-100f, 0f),
+                width: 200f,
+                height: GroupHeaderH);
+            categoryBtn.SetActive(true);
+            var categoryLabel = categoryBtn.GetComponentInChildren<Text>();
+            if (categoryLabel)
+            {
+                categoryLabel.fontSize = 14;
+                _categoryButtonLabels[category] = categoryLabel;
+            }
+            categoryBtn.GetComponent<Button>().onClick.AddListener(() =>
+            {
+                bool nowExcluded = LootFilterService.ToggleCategoryExcluded(category);
+                RefreshCategory(category);
+                Jotunn.Logger.LogInfo($"[LootFilter] category {category} excluded={nowExcluded}");
+            });
+
             var header = GUIManager.Instance.CreateText(
                 text: categoryName,
-                parent: section.transform,
+                parent: headerRow.transform,
                 anchorMin: new Vector2(0f, 1f),
                 anchorMax: new Vector2(1f, 1f),
                 position: Vector2.zero,
@@ -397,6 +504,14 @@ namespace ValheimLootFilter
 
             var headerText = header.GetComponent<Text>();
             if (headerText) headerText.alignment = TextAnchor.MiddleLeft;
+
+            // Header text must not swallow clicks meant for the button
+            if (headerText)
+            {
+                headerText.raycastTarget = false;
+                headerText.supportRichText = true;
+                _categoryHeaders[category] = headerText;
+            }
 
             //  Grid row 
             var grid = new GameObject($"Grid_{categoryName}", typeof(RectTransform));
@@ -422,13 +537,15 @@ namespace ValheimLootFilter
 
             //  Item cells 
             foreach (var item in items)
-                CreateItemCell(grid.transform, section, item);
+                CreateItemCell(grid.transform, section, category, item);
+
+            RefreshCategory(category);
         }
 
         //  Single icon cell 
-        private static void CreateItemCell(Transform parent, GameObject section, ItemDrop item)
+        private static void CreateItemCell(Transform parent, GameObject section,
+            ItemDrop.ItemData.ItemType category, ItemDrop item)
         {
-            bool isExcluded = LootFilterService.IsExcluded(item.name);
 
             // Root button object
             var cell = new GameObject($"Cell_{item.name}", typeof(RectTransform));
@@ -454,7 +571,6 @@ namespace ValheimLootFilter
             var sprite = GetItemSprite(item);
             if (sprite) iconImg.sprite = sprite;
 
-            iconImg.color = isExcluded ? ColExcluded : ColNormal;
 
             //  Red X overlay when excluded 
             var xOverlay = GUIManager.Instance.CreateText(
@@ -471,7 +587,27 @@ namespace ValheimLootFilter
                 width: CellSize,
                 height: CellSize,
                 addContentSizeFitter: false);
-            xOverlay.SetActive(isExcluded);
+
+            //  Keep-up-to amount, bottom right 
+            var limitGO = GUIManager.Instance.CreateText(
+                text: "",
+                parent: cell.transform,
+                anchorMin: new Vector2(1f, 0f),
+                anchorMax: new Vector2(1f, 0f),
+                position: new Vector2(-3f, 2f),
+                font: GUIManager.Instance.AveriaSerifBold,
+                fontSize: 14,
+                color: ColLimit,
+                outline: true,
+                outlineColor: Color.black,
+                width: CellSize,
+                height: 18f,
+                addContentSizeFitter: false);
+            var limitRT = limitGO.GetComponent<RectTransform>();
+            limitRT.pivot = new Vector2(1f, 0f);
+            var limitText = limitGO.GetComponent<Text>();
+            limitText.alignment = TextAnchor.LowerRight;
+            limitText.raycastTarget = false;
 
             //  Tooltip (item display name) 
             string displayName = item.m_itemData?.m_shared?.m_name ?? item.name;
@@ -482,24 +618,33 @@ namespace ValheimLootFilter
             _cells.Add((cell, displayName.ToLowerInvariant(), section));
 
             //  Hover tooltip 
-            var tooltip = cell.AddComponent<CellTooltip>();
-            tooltip.Set(displayName, TooltipText(isExcluded));
+            var view = new CellView
+            {
+                PrefabName = item.name,
+                DisplayName = displayName,
+                Category = category,
+                Icon = iconImg,
+                XOverlay = xOverlay,
+                LimitLabel = limitText,
+                Tooltip = cell.AddComponent<CellTooltip>(),
+            };
+            _cellViews.Add(view);
+            RefreshCell(view);
 
-            //  Button click handler 
-            // Capture locals for the closure
-            string itemName = item.name;
-            string capturedName = displayName;
-            Image capturedIcon = iconImg;
-            GameObject capturedX = xOverlay;
-
+            //  Left click: exclude/allow this item 
             btn.onClick.AddListener(() =>
             {
-                bool nowExcluded = LootFilterService.ToggleExcluded(itemName);
-                capturedIcon.color = nowExcluded ? ColExcluded : ColNormal;
-                capturedX.SetActive(nowExcluded);
-                tooltip.Set(capturedName, TooltipText(nowExcluded));
-                Jotunn.Logger.LogInfo($"[LootFilter] {itemName} excluded={nowExcluded}");
+                // A category-wide exclusion wins; the category button undoes it
+                if (LootFilterService.IsCategoryExcluded(view.Category))
+                    return;
+
+                bool nowExcluded = LootFilterService.ToggleExcluded(view.PrefabName);
+                RefreshCell(view);
+                Jotunn.Logger.LogInfo($"[LootFilter] {view.PrefabName} excluded={nowExcluded}");
             });
+
+            //  Right click: keep-up-to amount 
+            cell.AddComponent<RightClickHandler>().OnRightClick = () => OpenLimitPopup(view);
 
             // Colour tint block so hover feedback works
             var cb = btn.colors;
@@ -508,6 +653,124 @@ namespace ValheimLootFilter
             cb.pressedColor = new Color(0.7f, 0.7f, 0.7f, 1f);
             btn.colors = cb;
             btn.targetGraphic = bg;
+        }
+
+        //  Keep-up-to limit popup 
+        private static void BuildLimitPopup()
+        {
+            // Full-panel dimmer that also blocks clicks on the grid behind
+            _limitPopup = new GameObject("LimitPopup", typeof(RectTransform));
+            _limitPopup.transform.SetParent(_filtersPanel.transform, false);
+            var rootRT = (RectTransform)_limitPopup.transform;
+            rootRT.anchorMin = Vector2.zero;
+            rootRT.anchorMax = Vector2.one;
+            rootRT.offsetMin = Vector2.zero;
+            rootRT.offsetMax = Vector2.zero;
+            _limitPopup.AddComponent<Image>().color = new Color(0f, 0f, 0f, 0.5f);
+
+            var box = new GameObject("Box", typeof(RectTransform));
+            box.transform.SetParent(_limitPopup.transform, false);
+            var boxRT = (RectTransform)box.transform;
+            boxRT.anchorMin = boxRT.anchorMax = new Vector2(0.5f, 0.5f);
+            boxRT.sizeDelta = new Vector2(420f, 200f);
+            box.AddComponent<Image>().color = new Color(0.12f, 0.1f, 0.08f, 0.97f);
+
+            _limitPopupTitle = GUIManager.Instance.CreateText(
+                text: "",
+                parent: box.transform,
+                anchorMin: new Vector2(0.5f, 1f),
+                anchorMax: new Vector2(0.5f, 1f),
+                position: new Vector2(0f, -30f),
+                font: GUIManager.Instance.AveriaSerifBold,
+                fontSize: 18,
+                color: GUIManager.Instance.ValheimOrange,
+                outline: true,
+                outlineColor: Color.black,
+                width: 400f,
+                height: 50f,
+                addContentSizeFitter: false).GetComponent<Text>();
+            _limitPopupTitle.alignment = TextAnchor.MiddleCenter;
+
+            var field = GUIManager.Instance.CreateInputField(
+                parent: box.transform,
+                anchorMin: new Vector2(0.5f, 0.5f),
+                anchorMax: new Vector2(0.5f, 0.5f),
+                position: new Vector2(0f, 5f),
+                contentType: InputField.ContentType.IntegerNumber,
+                placeholderText: "No limit",
+                fontSize: 18,
+                width: 160f,
+                height: 34f);
+            _limitField = field.GetComponent<InputField>();
+            _limitField.characterLimit = 6;
+            _limitField.onEndEdit.AddListener(_ =>
+            {
+                // Enter saves; clicking elsewhere just leaves the field
+                if (ZInput.GetKeyDown(KeyCode.Return, false) || ZInput.GetKeyDown(KeyCode.KeypadEnter, false))
+                    SaveLimitPopup();
+            });
+
+            CreatePopupButton(box.transform, "Save", -135f, SaveLimitPopup);
+            CreatePopupButton(box.transform, "No limit", 0f, () =>
+            {
+                _limitField.text = "";
+                SaveLimitPopup();
+            });
+            CreatePopupButton(box.transform, "Cancel", 135f, CloseLimitPopup);
+
+            _limitPopup.SetActive(false);
+        }
+
+        private static void CreatePopupButton(Transform parent, string text, float x, UnityEngine.Events.UnityAction onClick)
+        {
+            var go = GUIManager.Instance.CreateButton(
+                text: text,
+                parent: parent,
+                anchorMin: new Vector2(0.5f, 0f),
+                anchorMax: new Vector2(0.5f, 0f),
+                position: new Vector2(x, 35f),
+                width: 125f,
+                height: 40f);
+            go.SetActive(true);
+            go.GetComponent<Button>().onClick.AddListener(onClick);
+        }
+
+        private static void OpenLimitPopup(CellView view)
+        {
+            if (!_limitPopup)
+                return;
+
+            _limitTarget = view;
+            _limitPopupTitle.text = $"Keep up to how many\n{view.DisplayName}?";
+            int limit = LootFilterService.GetQuantityLimit(view.PrefabName);
+            _limitField.text = limit > 0 ? limit.ToString() : "";
+
+            _limitPopup.SetActive(true);
+            _limitPopup.transform.SetAsLastSibling();
+            _limitField.Select();
+            _limitField.ActivateInputField();
+        }
+
+        private static void SaveLimitPopup()
+        {
+            if (_limitTarget != null)
+            {
+                int.TryParse(_limitField.text, out int limit);
+                LootFilterService.SetQuantityLimit(_limitTarget.PrefabName, limit);
+                RefreshCell(_limitTarget);
+                Jotunn.Logger.LogInfo($"[LootFilter] {_limitTarget.PrefabName} limit={limit}");
+            }
+
+            CloseLimitPopup();
+        }
+
+        private static void CloseLimitPopup()
+        {
+            _limitTarget = null;
+            if (_limitField)
+                _limitField.DeactivateInputField();
+            if (_limitPopup)
+                _limitPopup.SetActive(false);
         }
 
         private static Sprite GetItemSprite(ItemDrop item)
@@ -705,6 +968,18 @@ namespace ValheimLootFilter
             top = Mathf.Clamp(top, Mathf.Min(size.y, Screen.height), Screen.height);
 
             s_tooltip.position = new Vector3(left, top, 0f);
+        }
+    }
+
+    /// <summary>Calls OnRightClick when the cell is right-clicked (Button only handles left).</summary>
+    internal class RightClickHandler : MonoBehaviour, IPointerClickHandler
+    {
+        public System.Action OnRightClick;
+
+        public void OnPointerClick(PointerEventData eventData)
+        {
+            if (eventData.button == PointerEventData.InputButton.Right)
+                OnRightClick?.Invoke();
         }
     }
 
